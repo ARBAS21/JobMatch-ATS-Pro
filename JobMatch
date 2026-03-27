@@ -1,0 +1,194 @@
+import tkinter as tk
+from tkinter import filedialog, scrolledtext, messagebox, ttk
+import PyPDF2
+import re
+import unicodedata
+import json
+import os
+from datetime import datetime
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+# ==========================================
+# 🧠 NÚCLEO DE INTELIGENCIA (ATS ENGINE)
+# ==========================================
+class ATSEngine:
+    def __init__(self):
+        self.vectorizer = TfidfVectorizer(
+            ngram_range=(1, 3),
+            strip_accents='unicode',
+            lowercase=True
+        )
+
+    def normalizar(self, texto):
+        if not texto: return ""
+        # Elimina acentos y caracteres especiales para matching exacto
+        texto = "".join(c for c in unicodedata.normalize('NFD', texto) 
+                       if unicodedata.category(c) != 'Mn')
+        return texto.lower()
+
+    def calcular_match(self, texto_hv, texto_v):
+        t_hv = self.normalizar(texto_hv)
+        t_v = self.normalizar(texto_v)
+
+        if not t_hv or not t_v:
+            return 0, [], []
+
+        # 1. Extracción de Keywords Reales (Palabras de poder de 4 a 20 letras)
+        # Filtramos palabras muy comunes que inflan el puntaje
+        palabras_v = set(re.findall(r'\b[a-z]{4,20}\b', t_v))
+        ruido = {'para', 'esta', 'esta', 'como', 'descripcion', 'perfil', 'empresa', 
+                 'medellin', 'antioquia', 'experiencia', 'requisitos', 'cargo', 'laboral'}
+        
+        keywords_reales = {k for k in palabras_v if k not in ruido}
+
+        # 2. Contar Coincidencias Exactas o por Raíz
+        coincidencias = []
+        for k in keywords_reales:
+            # Buscamos si la palabra (o su raíz de 5 letras) está en la HV
+            if re.search(r'\b' + re.escape(k[:5]), t_hv):
+                coincidencias.append(k)
+        
+        faltantes = list(keywords_reales - set(coincidencias))
+
+        # 3. Similitud Semántica (Coseno) con penalización
+        try:
+            # Agregamos un texto 'neutral' para evitar que el 100% sea tan fácil
+            # Esto ayuda a que el modelo tenga un punto de comparación real
+            tfidf = self.vectorizer.fit_transform([t_hv, t_v])
+            similitud_base = cosine_similarity(tfidf[0:1], tfidf[1:2])[0][0]
+        except:
+            similitud_base = 0
+
+        # 4. Cálculo del Score (Sistema de Castigo y Recompensa)
+        # Cobertura: ¿Qué tanto de lo que piden tienes?
+        cobertura = len(coincidencias) / len(keywords_reales) if keywords_reales else 0
+        
+        # El Score final es el promedio de la similitud semántica y la cobertura de palabras clave
+        score_final = (similitud_base * 50) + (cobertura * 50)
+
+        # SI ES UNA VACANTE DE SALUD Y TÚ ERES ELECTRICISTA:
+        # El coseno bajará porque no compartes términos como 'paciente', 'triage', 'enfermero'
+        
+        return round(min(score_final, 100), 2), sorted(coincidencias), sorted(faltantes)
+# ==========================================
+# 💼 CONSULTOR DE CARRERA (IA TIPS)
+# ==========================================
+def obtener_consejos_ia(faltantes, coincidencias):
+    tips = []
+    criticas = {'logistica', 'inventarios', 'suministros', 'sap', 'siigo', 'power', 'excel', 'erp'}
+    
+    prioritarias = [f for f in faltantes if f in criticas]
+    
+    if prioritarias:
+        tips.append(f"🚩 ¡ALERTA! Tu HV no tiene: {', '.join(prioritarias).upper()}.")
+        tips.append("💡 CONSEJO: Incluye estas palabras en tus logros para que los filtros ATS te vean.")
+    
+    if 'profesional' in faltantes and 'tecnico' in coincidencias:
+        tips.append("🎓 NOTA: Piden profesional. Resalta tus 5+ años de experiencia para compensar.")
+
+    if not tips:
+        tips.append("✅ Perfil altamente alineado. ¡Estás listo para postular!")
+        
+    return "\n".join(tips)
+
+# ==========================================
+# 🖥️ INTERFAZ GRÁFICA (GUI)
+# ==========================================
+class JobMatchApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("JobMatch ATS Pro v1.0 - MVP")
+        self.root.geometry("850x900")
+        self.root.configure(bg="#f8f9fa")
+        self.engine = ATSEngine()
+        self.ruta_hv = ""
+
+        self.setup_ui()
+
+    def setup_ui(self):
+        # Header
+        header = tk.Frame(self.root, bg="#2c3e50", height=80)
+        header.pack(fill="x")
+        tk.Label(header, text="JOBMATCH ATS ANALYZER", fg="white", bg="#2c3e50", 
+                 font=("Helvetica", 18, "bold")).pack(pady=20)
+
+        # Main Container
+        main = tk.Frame(self.root, bg="#f8f9fa")
+        main.pack(fill="both", expand=True, padx=30, pady=10)
+
+        # Botón Carga
+        self.btn_hv = tk.Button(main, text="📂 CARGAR MI HOJA DE VIDA (PDF)", 
+                               command=self.cargar_hv, bg="#3498db", fg="white", 
+                               font=("Arial", 10, "bold"), padx=20)
+        self.btn_hv.pack(pady=10)
+        self.lbl_hv = tk.Label(main, text="Archivo no seleccionado", bg="#f8f9fa", fg="#7f8c8d")
+        self.lbl_hv.pack()
+
+        # Input Vacante
+        tk.Label(main, text="Pega la descripción de la vacante aquí:", bg="#f8f9fa", 
+                 font=("Arial", 10, "bold")).pack(anchor="w")
+        self.txt_v = scrolledtext.ScrolledText(main, height=8, font=("Arial", 10))
+        self.txt_v.pack(fill="x", pady=5)
+
+        # Botón Acción
+        tk.Button(main, text="🔍 ANALIZAR MI MATCH", command=self.analizar, 
+                  bg="#27ae60", fg="white", font=("Arial", 12, "bold"), pady=10).pack(fill="x", pady=20)
+
+        # Resultados Score
+        self.lbl_score = tk.Label(main, text="0%", font=("Impact", 50), bg="#f8f9fa", fg="#bdc3c7")
+        self.lbl_score.pack()
+
+        # Paneles de Detalles
+        detalles = tk.Frame(main, bg="#f8f9fa")
+        detalles.pack(fill="both", expand=True)
+
+        # Fortalezas y Brechas
+        tk.Label(detalles, text="✅ FORTALEZAS:", fg="#27ae60", bg="#f8f9fa", font=("Arial", 9, "bold")).pack(anchor="w")
+        self.res_si = scrolledtext.ScrolledText(detalles, height=4, bg="#e8f5e9")
+        self.res_si.pack(fill="x", pady=5)
+
+        tk.Label(detalles, text="❌ BRECHAS DETECTADAS:", fg="#e74c3c", bg="#f8f9fa", font=("Arial", 9, "bold")).pack(anchor="w")
+        self.res_no = scrolledtext.ScrolledText(detalles, height=4, bg="#fdecea")
+        self.res_no.pack(fill="x", pady=5)
+
+        # Consultor de Carrera
+        tk.Label(detalles, text="💡 CONSEJOS DEL CONSULTOR IA:", fg="#d35400", bg="#f8f9fa", font=("Arial", 10, "bold")).pack(anchor="w")
+        self.res_tips = scrolledtext.ScrolledText(detalles, height=4, bg="#fff3e0", font=("Arial", 10, "italic"))
+        self.res_tips.pack(fill="x", pady=5)
+
+    def cargar_hv(self):
+        self.ruta_hv = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
+        if self.ruta_hv:
+            nombre = os.path.basename(self.ruta_hv)
+            self.lbl_hv.config(text=f"✅ {nombre}", fg="#27ae60")
+
+    def analizar(self):
+        vacante = self.txt_v.get("1.0", tk.END).strip()
+        if not self.ruta_hv or not vacante:
+            messagebox.showwarning("Atención", "Por favor carga tu HV y pega la descripción de la vacante.")
+            return
+
+        try:
+            with open(self.ruta_hv, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+                texto_hv = "".join([p.extract_text() for p in reader.pages])
+
+            score, si, no = self.engine.calcular_match(texto_hv, vacante)
+            tips = obtener_consejos_ia(no, si)
+
+            # Actualizar UI
+            color = "#27ae60" if score > 70 else "#f1c40f" if score > 40 else "#e74c3c"
+            self.lbl_score.config(text=f"{score}%", fg=color)
+            
+            self.res_si.delete("1.0", tk.END); self.res_si.insert(tk.END, ", ".join(si))
+            self.res_no.delete("1.0", tk.END); self.res_no.insert(tk.END, ", ".join(no))
+            self.res_tips.delete("1.0", tk.END); self.res_tips.insert(tk.END, tips)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Ocurrió un error: {str(e)}")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = JobMatchApp(root)
+    root.mainloop()
